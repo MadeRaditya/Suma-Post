@@ -1,693 +1,384 @@
 <?php
-require_once __DIR__ . '/includes/api.php';
+require_once __DIR__ . '/includes/helpers.php';
 
-$view = $_GET['page'] ?? 'dashboard';
-$searchQuery = trim($_GET['search'] ?? '');
-$selectedCategory = trim($_GET['cat'] ?? '');
-$layout = $_GET['layout'] ?? 'grid';
-$currentPage = max(1, intval($_GET['p'] ?? 1));
-$perPage = defined('PER_PAGE') ? PER_PAGE : 6;
+// ── Request parameters
+$searchQuery      = trim($_GET['search'] ?? '');
+$selectedCatSlug  = trim($_GET['cat'] ?? '');
+$selectedTagId    = max(0, intval($_GET['tag_id'] ?? 0));
+$selectedAuthorId = max(0, intval($_GET['author_id'] ?? 0));
+$currentPage      = max(1, intval($_GET['p'] ?? 1));
 
-// Fetch articles from the configured API endpoint
-$apiMeta = [];
-$allArticles = get_all_articles([], $apiMeta);
-$totalFetched = count($allArticles);
+// ── Resolve category slug → ID  (2-step: slug → API → ID)
+$selectedCatId   = null;
+$selectedCatName = '';
+if (!empty($selectedCatSlug)) {
+    $selectedCatId = resolve_slug_to_id('categories', $selectedCatSlug);
+    // Fetch category name for display
+    if ($selectedCatId) {
+        $catObj          = get_category_by_id($selectedCatId);
+        $selectedCatName = $catObj['name'] ?? ucwords(str_replace('-', ' ', $selectedCatSlug));
+    }
+}
 
-// Extract taxonomies for quick filter tabs
-$taxData = extract_taxonomies($allArticles);
-$categoriesList = $taxData['categories'] ?? [];
-$tagsList = $taxData['tags'] ?? [];
+// ── Determine if hero slider should show
+$showSlider = ($currentPage === 1 && empty($searchQuery) && empty($selectedCatSlug) && $selectedTagId === 0 && $selectedAuthorId === 0);
 
-// Filter articles by search keyword and category
-$filteredArticles = $allArticles;
+// ── Fetch slider posts (first 4 posts, separate call on page 1)
+$sliderArticles = [];
+$sliderIds      = [];
+if ($showSlider) {
+    [$sliderPages, $sliderItems] = [0, 0];
+    $sliderArticles = get_posts(['per_page' => 4, 'page' => 1], $sliderPages, $sliderItems);
+    $sliderIds      = array_column($sliderArticles, 'id');
+}
 
-if (!empty($selectedCategory)) {
-    $filteredArticles = array_filter($filteredArticles, function ($item) use ($selectedCategory) {
-        $classList = $item['class_list'] ?? [];
-        return in_array('category-' . $selectedCategory, $classList) || in_array($selectedCategory, $classList);
-    });
+// ── Build feed parameters
+$feedParams = ['per_page' => PER_PAGE, 'page' => $currentPage];
+
+if (!empty($selectedCatId)) {
+    $feedParams['categories'] = $selectedCatId;
+}
+
+if ($selectedTagId > 0) {
+    $feedParams['tags'] = $selectedTagId;
+}
+
+if ($selectedAuthorId > 0) {
+    $feedParams['author'] = $selectedAuthorId;
 }
 
 if (!empty($searchQuery)) {
-    $filteredArticles = array_filter($filteredArticles, function ($item) use ($searchQuery) {
-        $title = $item['title']['rendered'] ?? '';
-        $excerpt = $item['excerpt']['rendered'] ?? '';
-        return (stripos($title, $searchQuery) !== false) || (stripos($excerpt, $searchQuery) !== false);
-    });
+    $feedParams['search'] = $searchQuery;
+}
+// Exclude slider posts from feed to prevent duplicates (page 1 only)
+if (!empty($sliderIds)) {
+    $feedParams['exclude'] = implode(',', $sliderIds);
 }
 
-$filteredArticles = array_values($filteredArticles);
-$totalItems = count($filteredArticles);
-$totalPages = max(1, ceil($totalItems / $perPage));
-$offset = ($currentPage - 1) * $perPage;
-$paginatedArticles = array_slice($filteredArticles, $offset, $perPage);
+// ── Fetch paginated feed posts
+$totalPages      = 0;
+$totalItems      = 0;
+$paginatedArticles = get_posts($feedParams, $totalPages, $totalItems);
+$currentPage       = min($currentPage, max(1, $totalPages ?: 1));
 
-// API Health Stats
-$apiHealth = get_api_health();
+// ── Helper: build URL for pagination
+function build_page_url(int $pageNum, string $cat = '', string $search = '', int $tagId = 0, int $authorId = 0): string
+{
+    $p = ['p' => $pageNum];
+    if (!empty($cat))    $p['cat']    = $cat;
+    if (!empty($search)) $p['search'] = $search;
+    if ($tagId > 0) $p['tag_id'] = $tagId;
+    if ($authorId > 0) $p['author_id'] = $authorId;
+    return 'index.php?' . http_build_query($p);
+}
+
+// ── Render page
+$pageTitle = '';
+if (!empty($selectedCatName)) {
+    $pageTitle = 'Kategori: ' . $selectedCatName;
+} elseif (!empty($searchQuery)) {
+    $pageTitle = 'Hasil Pencarian: "' . $searchQuery . '"';
+}
+
+if ($selectedAuthorId > 0) {
+    $authorObj = get_author_by_id($selectedAuthorId);
+    $selectedAuthorName = $authorObj['name'] ?? 'Penulis #' . $selectedAuthorId;
+}
+
+render_site_header($pageTitle, 'home', $selectedCatSlug, $searchQuery);
 ?>
-<!DOCTYPE html>
-<html lang="id">
 
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title><?= htmlspecialchars(APP_NAME) ?> — Enterprise REST API Dashboard</title>
-    <link rel="stylesheet" href="assets/css/style.css">
-</head>
-
-<body>
-
-    <div class="app-container">
-        <!-- Sidebar Navigation -->
-        <aside class="sidebar" id="appSidebar">
-            <div class="sidebar-header">
-                <div class="brand-wrapper">
-                    <div class="brand-icon">◈</div>
-                    <div class="brand-meta">
-                        <span class="brand-title"><?= htmlspecialchars(APP_NAME) ?></span>
-                        <span class="brand-subtitle">WP-JSON Explorer</span>
-                    </div>
-                </div>
-                <button type="button" class="sidebar-close-btn" id="sidebarCloseBtn" aria-label="Tutup Menu Navigasi">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <line x1="18" y1="6" x2="6" y2="18"></line>
-                        <line x1="6" y1="6" x2="18" y2="18"></line>
-                    </svg>
-                </button>
-            </div>
-
-            <div class="sidebar-content">
-                <div class="sidebar-section">
-                    <span class="sidebar-section-title">Navigasi Utama</span>
-                    <a href="index.php?page=dashboard" class="sidebar-nav-item <?= $view === 'dashboard' ? 'active' : '' ?>">
-                        <span class="sidebar-nav-icon-label">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                <rect x="3" y="3" width="7" height="7"></rect>
-                                <rect x="14" y="3" width="7" height="7"></rect>
-                                <rect x="14" y="14" width="7" height="7"></rect>
-                                <rect x="3" y="14" width="7" height="7"></rect>
-                            </svg>
-                            <span>Dashboard Overview</span>
-                        </span>
-                        <span class="sidebar-nav-badge"><?= $totalFetched ?></span>
-                    </a>
-
-                    <a href="index.php?page=categories" class="sidebar-nav-item <?= $view === 'categories' ? 'active' : '' ?>">
-                        <span class="sidebar-nav-icon-label">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path>
-                                <line x1="7" y1="7" x2="7.01" y2="7"></line>
-                            </svg>
-                            <span>Taksonomi & Kategori</span>
-                        </span>
-                        <span class="sidebar-nav-badge"><?= count($categoriesList) ?></span>
-                    </a>
-
-                    <a href="index.php?page=settings" class="sidebar-nav-item <?= $view === 'settings' ? 'active' : '' ?>">
-                        <span class="sidebar-nav-icon-label">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                <circle cx="12" cy="12" r="3"></circle>
-                                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-                            </svg>
-                            <span>API Inspector</span>
-                        </span>
-                        <span class="sidebar-nav-badge"><?= $apiHealth['http_code'] ?></span>
-                    </a>
-                </div>
-            </div>
-
-            <div class="sidebar-footer">
-                <div class="endpoint-status-card">
-                    <div class="endpoint-status-header">
-                        <span>Backend Status</span>
-                        <div class="live-indicator">
-                            <span class="status-dot <?= $apiHealth['status'] === 'connected' ? '' : 'error' ?>"></span>
-                            <span><?= $apiHealth['status'] === 'connected' ? 'ONLINE' : 'ERROR' ?></span>
-                        </div>
-                    </div>
-                    <span class="endpoint-url-truncate" title="<?= htmlspecialchars(API_ENDPOINT_URL) ?>">
-                        <?= htmlspecialchars(API_ENDPOINT_URL) ?>
+<main class="main-content-layout">
+    <div class="news-container">
+        <!-- Author Active Banner -->
+        <?php if ($selectedAuthorId > 0) : ?>
+            <div class="search-feedback-banner">
+                <div class="search-feedback-text">
+                    <span>
+                        Artikel oleh:
+                        <strong>
+                            <?= htmlspecialchars($selectedAuthorName) ?>
+                        </strong>
+                        · <?= number_format($totalItems) ?> berita ditemukan
                     </span>
                 </div>
+
+                <a href="<?= htmlspecialchars(home_url()) ?>"
+                    class="btn-clear-search">
+                    Hapus Filter
+                </a>
             </div>
-        </aside>
+        <?php endif; ?>
 
-        <!-- Mobile Sidebar Backdrop Overlay -->
-        <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+        <!-- Tag Active Banner -->
+        <?php if ($selectedTagId > 0) : ?>
+            <?php
+            $activeTag = get_tags([
+                'include'   => [$selectedTagId],
+                'hide_empty' => 'false',
+                'per_page'  => 1
+            ]);
+            $activeTagName = $activeTag[0]['name'] ?? 'Tag #' . $selectedTagId;
+            ?>
 
-        <!-- Main Workspace -->
-        <div class="main-area">
-            <!-- Top App Bar -->
-            <header class="top-navbar">
-                <div class="navbar-left-group">
-                    <button type="button" class="mobile-nav-toggle" id="mobileNavToggle" aria-label="Buka Menu Navigasi">
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <line x1="3" y1="12" x2="21" y2="12"></line>
-                            <line x1="3" y1="6" x2="21" y2="6"></line>
-                            <line x1="3" y1="18" x2="21" y2="18"></line>
-                        </svg>
-                    </button>
-
-                    <nav class="navbar-breadcrumbs" aria-label="Breadcrumb">
-                        <a href="index.php">Dashboard</a>
-                        <span class="navbar-separator">/</span>
-                        <span class="navbar-current">
-                            <?= $view === 'categories' ? 'Taksonomi' : ($view === 'settings' ? 'API Inspector' : 'Semua Post') ?>
-                        </span>
-                    </nav>
+            <div class="search-feedback-banner">
+                <div class="search-feedback-text">
+                    <span>
+                        Artikel dengan tag:
+                        <strong># <?= htmlspecialchars($activeTagName) ?></strong>
+                        &nbsp;·&nbsp;
+                        <?= number_format($totalItems) ?> berita ditemukan
+                    </span>
                 </div>
 
-                <div class="navbar-actions">
-                    <a href="<?= htmlspecialchars(API_ENDPOINT_URL) ?>" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-outline" title="Buka endpoint JSON asli di tab baru">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
-                            <polyline points="15 3 21 3 21 9"></polyline>
-                            <line x1="10" y1="14" x2="21" y2="3"></line>
-                        </svg>
-                        <span class="nav-action-text">Raw Endpoint</span>
-                    </a>
-                    <a href="index.php?page=<?= urlencode($view) ?>" class="btn btn-sm btn-secondary" title="Muat ulang data dari endpoint">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <polyline points="23 4 23 10 17 10"></polyline>
-                            <polyline points="1 20 1 14 7 14"></polyline>
-                            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
-                        </svg>
-                        <span class="nav-action-text">Refresh</span>
-                    </a>
+                <a href="<?= htmlspecialchars(home_url()) ?>"
+                    class="btn-clear-search">
+                    Hapus Filter
+                </a>
+            </div>
+        <?php endif; ?>
+
+        <!-- Search / Category Active Banner -->
+        <?php if (!empty($searchQuery)) : ?>
+            <div class="search-feedback-banner">
+                <div class="search-feedback-text">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                        stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="11" cy="11" r="8" />
+                        <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                    </svg>
+                    <span>Hasil untuk: <strong>&ldquo;<?= htmlspecialchars($searchQuery) ?>&rdquo;</strong>
+                        &nbsp;·&nbsp; <?= number_format($totalItems) ?> berita ditemukan</span>
                 </div>
-            </header>
+                <a href="index.php<?= !empty($selectedCatSlug) ? '?cat=' . urlencode($selectedCatSlug) : '' ?>"
+                    class="btn-clear-search">
+                    Reset <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                        stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="18" y1="6" x2="6" y2="18" />
+                        <line x1="6" y1="6" x2="18" y2="18" />
+                    </svg>
+                </a>
+            </div>
+        <?php endif; ?>
 
-            <!-- Main Content Container -->
-            <main class="page-content">
+        <?php if (!empty($sliderArticles) || !empty($paginatedArticles)) : ?>
 
-                <?php if ($view === 'dashboard') : ?>
-                    <!-- Dashboard Header -->
-                    <section class="dashboard-header">
-                        <h1 class="dashboard-heading">Content Explorer</h1>
-                        <p class="dashboard-description">
-                            Pemantauan dan visualisasi data REST API dari <code class="mono"><?= htmlspecialchars(API_ENDPOINT_URL) ?></code>.
-                        </p>
-                    </section>
-
-                    <!-- Realtime Metrics Grid -->
-                    <section class="metrics-grid">
-                        <div class="metric-card">
-                            <div class="metric-header">
-                                <span class="metric-title">Total Post Ditemukan</span>
-                                <div class="metric-icon-wrap">
-                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                                        <polyline points="14 2 14 8 20 8"></polyline>
-                                        <line x1="16" y1="13" x2="8" y2="13"></line>
-                                        <line x1="16" y1="17" x2="8" y2="17"></line>
-                                        <polyline points="10 9 9 9 8 9"></polyline>
-                                    </svg>
-                                </div>
-                            </div>
-                            <div class="metric-value"><?= $totalFetched ?></div>
-                            <span class="metric-sub"><?= $totalItems !== $totalFetched ? "Hasil Filter: {$totalItems} post" : "Semua item aktif" ?></span>
-                        </div>
-
-                        <div class="metric-card">
-                            <div class="metric-header">
-                                <span class="metric-title">Status REST API</span>
-                                <div class="metric-icon-wrap">
-                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
-                                    </svg>
-                                </div>
-                            </div>
-                            <div class="metric-value">
-                                <span class="badge badge-success"><?= $apiHealth['http_code'] ?> OK</span>
-                            </div>
-                            <span class="metric-sub">Latensi ~<?= $apiHealth['latency_ms'] ?> ms</span>
-                        </div>
-
-                        <div class="metric-card">
-                            <div class="metric-header">
-                                <span class="metric-title">Kategori Taksonomi</span>
-                                <div class="metric-icon-wrap">
-                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                        <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path>
-                                    </svg>
-                                </div>
-                            </div>
-                            <div class="metric-value"><?= count($categoriesList) ?></div>
-                            <span class="metric-sub"><?= count($tagsList) ?> tags terindeks</span>
-                        </div>
-
-                        <div class="metric-card">
-                            <div class="metric-header">
-                                <span class="metric-title">Protokol Backend</span>
-                                <div class="metric-icon-wrap">
-                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                        <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
-                                        <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
-                                        <line x1="6" y1="6" x2="6.01" y2="6"></line>
-                                        <line x1="6" y1="18" x2="6.01" y2="18"></line>
-                                    </svg>
-                                </div>
-                            </div>
-                            <div class="metric-value">WordPress</div>
-                            <span class="metric-sub">WP REST API v2</span>
-                        </div>
-                    </section>
-
-                    <!-- Filter Toolbar -->
-                    <section class="action-toolbar">
-                        <form method="GET" action="index.php" class="toolbar-search-form" id="searchForm">
-                            <input type="hidden" name="page" value="dashboard">
-                            <input type="hidden" name="layout" value="<?= htmlspecialchars($layout) ?>">
-                            <?php if (!empty($selectedCategory)) : ?>
-                                <input type="hidden" name="cat" value="<?= htmlspecialchars($selectedCategory) ?>">
-                            <?php endif; ?>
-
-                            <span class="search-icon-adornment">
-                                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                    <circle cx="11" cy="11" r="8"></circle>
-                                    <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-                                </svg>
-                            </span>
-                            <input type="text" name="search" class="search-input-field" placeholder="Cari judul artikel atau konten..." value="<?= htmlspecialchars($searchQuery) ?>" autocomplete="off" id="searchInput">
-                            <span class="search-kbd">/</span>
-                        </form>
-
-                        <div class="toolbar-controls">
-                            <?php if (!empty($searchQuery) || !empty($selectedCategory)) : ?>
-                                <a href="index.php?page=dashboard&layout=<?= urlencode($layout) ?>" class="btn btn-outline btn-sm">
-                                    Reset Filter
-                                </a>
-                            <?php endif; ?>
-
-                            <!-- Layout Switcher (Grid vs Table) -->
-                            <div class="view-toggle-group" role="group" aria-label="Layout toggle">
-                                <a href="index.php?page=dashboard&layout=grid&search=<?= urlencode($searchQuery) ?>&cat=<?= urlencode($selectedCategory) ?>&p=<?= $currentPage ?>" class="view-toggle-btn <?= $layout === 'grid' ? 'active' : '' ?>" title="Tampilan Card Grid">
-                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                        <rect x="3" y="3" width="7" height="7"></rect>
-                                        <rect x="14" y="3" width="7" height="7"></rect>
-                                        <rect x="14" y="14" width="7" height="7"></rect>
-                                        <rect x="3" y="14" width="7" height="7"></rect>
-                                    </svg>
-                                    <span>Grid</span>
-                                </a>
-                                <a href="index.php?page=dashboard&layout=table&search=<?= urlencode($searchQuery) ?>&cat=<?= urlencode($selectedCategory) ?>&p=<?= $currentPage ?>" class="view-toggle-btn <?= $layout === 'table' ? 'active' : '' ?>" title="Tampilan Tabel Enterprise">
-                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                        <line x1="8" y1="6" x2="21" y2="6"></line>
-                                        <line x1="8" y1="12" x2="21" y2="12"></line>
-                                        <line x1="8" y1="18" x2="21" y2="18"></line>
-                                        <line x1="3" y1="6" x2="3.01" y2="6"></line>
-                                        <line x1="3" y1="12" x2="3.01" y2="12"></line>
-                                        <line x1="3" y1="18" x2="3.01" y2="18"></line>
-                                    </svg>
-                                    <span>Tabel</span>
-                                </a>
-                            </div>
-                        </div>
-                    </section>
-
-                    <!-- Category Pills Horizontal Scroll -->
-                    <?php if (!empty($categoriesList)) : ?>
-                        <nav class="tax-filters" aria-label="Kategori artikel">
-                            <a href="index.php?page=dashboard&layout=<?= urlencode($layout) ?>&search=<?= urlencode($searchQuery) ?>" class="tax-chip <?= empty($selectedCategory) ? 'active' : '' ?>">
-                                Semua Kategori (<?= $totalFetched ?>)
-                            </a>
-                            <?php foreach ($categoriesList as $cat) : ?>
-                                <a href="index.php?page=dashboard&layout=<?= urlencode($layout) ?>&cat=<?= urlencode($cat['slug']) ?>&search=<?= urlencode($searchQuery) ?>" class="tax-chip <?= $selectedCategory === $cat['slug'] ? 'active' : '' ?>">
-                                    <?= htmlspecialchars($cat['name']) ?> (<?= $cat['count'] ?>)
-                                </a>
-                            <?php endforeach; ?>
-                        </nav>
-                    <?php endif; ?>
-
-                    <!-- Articles Display -->
-                    <?php if (!empty($paginatedArticles)) : ?>
-                        <?php if ($layout === 'table') : ?>
-                            <!-- Table View -->
-                            <div class="data-table-wrapper">
-                                <table class="enterprise-table">
-                                    <thead>
-                                        <tr>
-                                            <th>ID Post</th>
-                                            <th>Judul & Excerpt</th>
-                                            <th>Penulis</th>
-                                            <th>Status</th>
-                                            <th>Tanggal Publish</th>
-                                            <th>Aksi</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        <?php foreach ($paginatedArticles as $item) :
-                                            $id = $item['id'] ?? '-';
-                                            $title = $item['title']['rendered'] ?? 'Tanpa Judul';
-                                            $excerpt = clean_excerpt($item['excerpt']['rendered'] ?? '', 100);
-                                            $author = $item['author'] ?? '29';
-                                            $commentStatus = $item['comment_status'] ?? 'closed';
-                                            $date = format_date($item['date'] ?? '');
-                                        ?>
-                                            <tr>
-                                                <td><span class="table-id-pill">#<?= htmlspecialchars($id) ?></span></td>
-                                                <td>
-                                                    <div class="table-post-info">
-                                                        <a href="detail.php?id=<?= urlencode($id) ?>" class="table-row-title">
-                                                            <?= htmlspecialchars($title) ?>
-                                                        </a>
-                                                        <span class="table-row-excerpt"><?= htmlspecialchars($excerpt) ?></span>
-                                                    </div>
-                                                </td>
-                                                <td>
-                                                    <div class="table-author-cell">
-                                                        <div class="avatar-mini">A</div>
-                                                        <span class="mono text-muted">ID: <?= htmlspecialchars($author) ?></span>
-                                                    </div>
-                                                </td>
-                                                <td>
-                                                    <span class="badge"><?= htmlspecialchars(strtoupper($commentStatus)) ?></span>
-                                                </td>
-                                                <td>
-                                                    <span class="mono text-muted"><?= htmlspecialchars($date) ?></span>
-                                                </td>
-                                                <td>
-                                                    <a href="detail.php?id=<?= urlencode($id) ?>" class="btn btn-sm btn-outline">
-                                                        Detail →
-                                                    </a>
-                                                </td>
-                                            </tr>
-                                        <?php endforeach; ?>
-                                    </tbody>
-                                </table>
-                            </div>
-                        <?php else : ?>
-                            <!-- Card Grid View -->
-                            <div class="articles-grid-layout">
-                                <?php foreach ($paginatedArticles as $item) :
-                                    $id = $item['id'] ?? '-';
-                                    $title = $item['title']['rendered'] ?? 'Tanpa Judul';
-                                    $excerpt = clean_excerpt($item['excerpt']['rendered'] ?? '', 140);
-                                    $date = format_date($item['date'] ?? '');
-                                    $featuredImage = extract_featured_image($item);
-                                    $classList = $item['class_list'] ?? [];
-                                ?>
-                                    <article class="article-post-card">
-                                        <div class="card-media-banner">
-                                            <span class="card-floating-id">#<?= htmlspecialchars($id) ?></span>
-                                            <?php if (!empty($featuredImage)) : ?>
-                                                <img src="<?= htmlspecialchars($featuredImage) ?>" alt="<?= htmlspecialchars($title) ?>" class="card-media-img" loading="lazy">
-                                            <?php else : ?>
-                                                <div class="card-media-placeholder">
-                                                    <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                                                        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
-                                                        <circle cx="8.5" cy="8.5" r="1.5"></circle>
-                                                        <polyline points="21 15 16 10 5 21"></polyline>
-                                                    </svg>
-                                                    <span class="badge badge-mono">REST API Post</span>
-                                                </div>
-                                            <?php endif; ?>
-                                        </div>
-
-                                        <div class="card-body-content">
-                                            <h2 class="card-article-title">
-                                                <a href="detail.php?id=<?= urlencode($id) ?>">
-                                                    <?= htmlspecialchars($title) ?>
-                                                </a>
-                                            </h2>
-
-                                            <p class="card-article-excerpt">
-                                                <?= htmlspecialchars($excerpt) ?>
-                                            </p>
-
-                                            <?php if (!empty($classList)) : ?>
-                                                <div class="card-tag-row">
-                                                    <?php 
-                                                    $tagCount = 0;
-                                                    foreach ($classList as $cls) : 
-                                                        if (strpos($cls, 'tag-') === 0 && $tagCount < 3) : 
-                                                            $tagName = str_replace('tag-', '', $cls);
-                                                            $tagCount++;
-                                                    ?>
-                                                        <span class="badge badge-outline">#<?= htmlspecialchars($tagName) ?></span>
-                                                    <?php 
-                                                        endif;
-                                                    endforeach; 
-                                                    ?>
-                                                </div>
-                                            <?php endif; ?>
-                                        </div>
-
-                                        <div class="card-footer-meta">
-                                            <div class="meta-time-text">
+            <!-- ── Headline Slider (page 1, no filters) -->
+            <?php if (!empty($sliderArticles)) : ?>
+                <section class="slider-headline-section" id="headlineSliderArea" aria-label="Berita Utama">
+                    <div class="slider-viewport" id="sliderViewport">
+                        <?php foreach ($sliderArticles as $idx => $slide) :
+                            $slideImg    = extract_featured_image($slide) ?: 'https://images.unsplash.com/photo-1585829365295-ab7cd400c167?w=1200&auto=format&fit=crop&q=80';
+                            $slideTitle  = $slide['title']['rendered'] ?? 'Tanpa Judul';
+                            $slideCat    = extract_post_category($slide);
+                            $slideCatSlug = extract_post_category_slug($slide);
+                            $slideAuthor = extract_post_author($slide);
+                            $slideDate   = format_date($slide['date'] ?? '');
+                            $slideLink   = page_url('post-detail.php', ['id' => $slide['id']]);
+                        ?>
+                            <article class="slider-slide<?= $idx === 0 ? ' active' : '' ?>" data-index="<?= $idx ?>">
+                                <a href="<?= htmlspecialchars($slideLink) ?>" aria-label="<?= htmlspecialchars($slideTitle) ?>">
+                                    <img src="<?= htmlspecialchars($slideImg) ?>"
+                                        alt="<?= htmlspecialchars($slideTitle) ?>"
+                                        class="slide-cover-img"
+                                        loading="<?= $idx === 0 ? 'eager' : 'lazy' ?>">
+                                    <div class="slide-overlay"></div>
+                                    <div class="slide-caption">
+                                        <span class="slide-cat-badge"><?= htmlspecialchars($slideCat) ?></span>
+                                        <h2 class="slide-title"><?= htmlspecialchars($slideTitle) ?></h2>
+                                        <div class="slide-meta-row">
+                                            <span class="slide-meta-item">
                                                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                                    <circle cx="12" cy="12" r="10"></circle>
-                                                    <polyline points="12 6 12 12 16 14"></polyline>
+                                                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                                                    <circle cx="12" cy="7" r="4" />
                                                 </svg>
-                                                <span><?= htmlspecialchars($date) ?></span>
-                                            </div>
-                                            <a href="detail.php?id=<?= urlencode($id) ?>" class="btn btn-sm btn-outline">
-                                                Baca →
-                                            </a>
+                                                <?= htmlspecialchars($slideAuthor) ?>
+                                            </span>
+                                            <span aria-hidden="true">·</span>
+                                            <span class="slide-meta-item">
+                                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                                    <circle cx="12" cy="12" r="10" />
+                                                    <polyline points="12 6 12 12 16 14" />
+                                                </svg>
+                                                <?= htmlspecialchars($slideDate) ?>
+                                            </span>
                                         </div>
-                                    </article>
-                                <?php endforeach; ?>
+                                    </div>
+                                </a>
+                            </article>
+                        <?php endforeach; ?>
+
+                        <?php if (count($sliderArticles) > 1) : ?>
+                            <button type="button" class="slider-arrow-btn prev" id="sliderPrevBtn" aria-label="Sebelumnya">&#10094;</button>
+                            <button type="button" class="slider-arrow-btn next" id="sliderNextBtn" aria-label="Selanjutnya">&#10095;</button>
+                            <div class="slider-dots-shelf" id="sliderDotsShelf">
+                                <?php for ($i = 0; $i < count($sliderArticles); $i++) : ?>
+                                    <button type="button" class="slider-dot<?= $i === 0 ? ' active' : '' ?>"
+                                        data-slide="<?= $i ?>" aria-label="Slide <?= $i + 1 ?>"></button>
+                                <?php endfor; ?>
                             </div>
                         <?php endif; ?>
+                    </div>
+                </section>
+            <?php endif; ?>
 
-                        <!-- Pagination Shelf -->
-                        <?php if ($totalPages > 1) : ?>
-                            <nav class="pagination-shelf" aria-label="Halaman navigasi">
-                                <span class="pagination-entries-info">
-                                    Menampilkan <?= $offset + 1 ?>–<?= min($offset + $perPage, $totalItems) ?> dari <?= $totalItems ?> artikel
-                                </span>
-
-                                <div class="pagination-button-cluster">
-                                    <?php if ($currentPage > 1) : ?>
-                                        <a href="index.php?page=dashboard&layout=<?= urlencode($layout) ?>&search=<?= urlencode($searchQuery) ?>&cat=<?= urlencode($selectedCategory) ?>&p=<?= $currentPage - 1 ?>" class="pagination-nav-btn" title="Halaman Sebelumnya">
-                                            ←
-                                        </a>
-                                    <?php endif; ?>
-
-                                    <?php for ($i = 1; $i <= $totalPages; $i++) : ?>
-                                        <a href="index.php?page=dashboard&layout=<?= urlencode($layout) ?>&search=<?= urlencode($searchQuery) ?>&cat=<?= urlencode($selectedCategory) ?>&p=<?= $i ?>" class="pagination-nav-btn <?= $i === $currentPage ? 'active' : '' ?>">
-                                            <?= $i ?>
-                                        </a>
-                                    <?php endfor; ?>
-
-                                    <?php if ($currentPage < $totalPages) : ?>
-                                        <a href="index.php?page=dashboard&layout=<?= urlencode($layout) ?>&search=<?= urlencode($searchQuery) ?>&cat=<?= urlencode($selectedCategory) ?>&p=<?= $currentPage + 1 ?>" class="pagination-nav-btn" title="Halaman Selanjutnya">
-                                            →
-                                        </a>
-                                    <?php endif; ?>
-                                </div>
-                            </nav>
-                        <?php endif; ?>
-
-                    <?php else : ?>
-                        <!-- Empty Search Results or API Unreachable -->
-                        <div class="empty-data-state">
-                            <div class="empty-state-icon">
-                                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                    <circle cx="11" cy="11" r="8"></circle>
-                                    <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-                                </svg>
-                            </div>
-                            <h2 class="empty-state-title">Tidak Ada Artikel Ditemukan</h2>
-                            <p class="empty-state-desc">
-                                <?= !empty($searchQuery) || !empty($selectedCategory) 
-                                    ? 'Tidak ada data artikel yang sesuai dengan filter pencarian Anda.' 
-                                    : 'Tidak dapat memuat artikel dari endpoint backend. Pastikan URL endpoint valid dan server dapat diakses.' ?>
-                            </p>
-                            <div class="flex-row-center">
-                                <a href="index.php?page=dashboard" class="btn btn-outline">
-                                    Reset Semua Filter
-                                </a>
-                                <a href="index.php?page=settings" class="btn btn-secondary">
-                                    Cek Pengaturan API
-                                </a>
-                            </div>
+            <!-- ── Feed Section -->
+            <?php if (!empty($paginatedArticles)) : ?>
+                <section class="news-feed-section">
+                    <header class="section-headline-bar">
+                        <div class="section-title-mark">
+                            <span class="section-red-bar"></span>
+                            <span><?= !empty($selectedCatName)
+                                        ? 'Berita ' . htmlspecialchars(ucwords($selectedCatName))
+                                        : (!empty($searchQuery) ? 'Hasil Pencarian' : 'Berita Terbaru') ?></span>
                         </div>
-                    <?php endif; ?>
+                        <span class="section-items-count"><?= number_format($totalItems) ?> Berita</span>
+                    </header>
 
-                <?php elseif ($view === 'categories') : ?>
-                    <!-- Categories & Taxonomy View -->
-                    <section class="dashboard-header">
-                        <h1 class="dashboard-heading">Taksonomi & Kategori</h1>
-                        <p class="dashboard-description">
-                            Klasifikasi kategori dan tag yang diekstrak secara otomatis dari respon REST API backend.
-                        </p>
-                    </section>
-
-                    <div class="settings-grid">
-                        <div class="config-card">
-                            <div class="config-card-header">
-                                <h2 class="config-card-title">Daftar Kategori Terdeteksi</h2>
-                                <span class="badge"><?= count($categoriesList) ?> Kategori</span>
-                            </div>
-
-                            <div class="data-table-wrapper">
-                                <table class="enterprise-table">
-                                    <thead>
-                                        <tr>
-                                            <th>Nama Kategori</th>
-                                            <th>Slug</th>
-                                            <th>Jumlah Post</th>
-                                            <th>Aksi</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        <?php if (!empty($categoriesList)) : ?>
-                                            <?php foreach ($categoriesList as $cat) : ?>
-                                                <tr>
-                                                    <td><strong><?= htmlspecialchars($cat['name']) ?></strong></td>
-                                                    <td><code class="mono"><?= htmlspecialchars($cat['slug']) ?></code></td>
-                                                    <td><span class="badge"><?= $cat['count'] ?> post</span></td>
-                                                    <td>
-                                                        <a href="index.php?page=dashboard&cat=<?= urlencode($cat['slug']) ?>" class="btn btn-sm btn-outline">
-                                                            Filter Post →
-                                                        </a>
-                                                    </td>
-                                                </tr>
-                                            <?php endforeach; ?>
-                                        <?php else : ?>
-                                            <tr>
-                                                <td colspan="4" class="text-center text-muted">Belum ada taksonomi kategori terdeteksi.</td>
-                                            </tr>
+                    <div class="news-articles-grid">
+                        <?php foreach ($paginatedArticles as $post) :
+                            $postTitle   = $post['title']['rendered'] ?? 'Tanpa Judul';
+                            $postImg     = extract_featured_image($post) ?: 'https://images.unsplash.com/photo-1585829365295-ab7cd400c167?w=400&auto=format&fit=crop&q=80';
+                            $postCat     = extract_post_category($post);
+                            $postAuthor  = extract_post_author($post);
+                            $postDate    = format_date($post['date'] ?? '');
+                            $postExcerpt = clean_excerpt($post['excerpt']['rendered'] ?? '', 110);
+                            $postLink    = page_url('post-detail.php', ['id' => $post['id']]);
+                        ?>
+                            <article class="news-article-card">
+                                <a href="<?= htmlspecialchars($postLink) ?>"
+                                    class="card-thumbnail-link"
+                                    aria-label="<?= htmlspecialchars($postTitle) ?>">
+                                    <img src="<?= htmlspecialchars($postImg) ?>"
+                                        alt="<?= htmlspecialchars($postTitle) ?>"
+                                        class="card-thumbnail-img" loading="lazy">
+                                </a>
+                                <div class="card-content-col">
+                                    <div class="card-top-content">
+                                        <div class="card-meta-line">
+                                            <span class="card-cat-name"><?= htmlspecialchars($postCat) ?></span>
+                                            <span class="card-date-indicator">
+                                                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                                    <rect x="3" y="4" width="18" height="18" rx="2" />
+                                                    <line x1="16" y1="2" x2="16" y2="6" />
+                                                    <line x1="8" y1="2" x2="8" y2="6" />
+                                                    <line x1="3" y1="10" x2="21" y2="10" />
+                                                </svg>
+                                                <?= htmlspecialchars($postDate) ?>
+                                            </span>
+                                        </div>
+                                        <h2 class="card-post-title">
+                                            <a href="<?= htmlspecialchars($postLink) ?>">
+                                                <?= htmlspecialchars($postTitle) ?>
+                                            </a>
+                                        </h2>
+                                        <?php if ($postExcerpt) : ?>
+                                            <p class="card-excerpt-text"><?= htmlspecialchars($postExcerpt) ?></p>
                                         <?php endif; ?>
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-
-                        <div class="config-card">
-                            <div class="config-card-header">
-                                <h2 class="config-card-title">Daftar Tag Populer</h2>
-                                <span class="badge"><?= count($tagsList) ?> Tags</span>
-                            </div>
-
-                            <div class="card-tag-row">
-                                <?php if (!empty($tagsList)) : ?>
-                                    <?php foreach ($tagsList as $tg) : ?>
-                                        <a href="index.php?page=dashboard&search=<?= urlencode($tg['name']) ?>" class="badge badge-outline">
-                                            #<?= htmlspecialchars($tg['name']) ?> (<?= $tg['count'] ?>)
-                                        </a>
-                                    <?php endforeach; ?>
-                                <?php else : ?>
-                                    <span class="text-muted">Tidak ada tag.</span>
-                                <?php endif; ?>
-                            </div>
-                        </div>
-                    </div>
-
-                <?php elseif ($view === 'settings') : ?>
-                    <!-- Settings & API Inspector View -->
-                    <section class="dashboard-header">
-                        <h1 class="dashboard-heading">API Inspector & Konfigurasi</h1>
-                        <p class="dashboard-description">
-                            Status koneksi langsung, latensi respon, dan informasi teknis endpoint REST API.
-                        </p>
-                    </section>
-
-                    <div class="settings-grid">
-                        <div class="config-card">
-                            <div class="config-card-header">
-                                <h2 class="config-card-title">Konfigurasi Endpoint</h2>
-                                <span class="badge badge-success"><?= htmlspecialchars(APP_ENV) ?></span>
-                            </div>
-
-                            <div class="form-group-block">
-                                <label class="form-label-text">API Endpoint URL (Base)</label>
-                                <input type="text" class="form-control-input" value="<?= htmlspecialchars(API_ENDPOINT_URL) ?>" readonly id="endpointUrlInput">
-                            </div>
-
-                            <div class="form-group-block">
-                                <label class="form-label-text">Status Koneksi Server</label>
-                                <div class="status-pill-row">
-                                    <span class="status-dot <?= $apiHealth['status'] === 'connected' ? '' : 'error' ?>"></span>
-                                    <span><strong><?= $apiHealth['http_code'] ?> OK</strong> — Terhubung ke backend</span>
+                                    </div>
+                                    <div class="card-bottom-row">
+                                        <span>Oleh <?= htmlspecialchars($postAuthor) ?></span>
+                                        <span class="card-read-action">
+                                            Baca
+                                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                                <line x1="5" y1="12" x2="19" y2="12" />
+                                                <polyline points="12 5 19 12 12 19" />
+                                            </svg>
+                                        </span>
+                                    </div>
                                 </div>
-                            </div>
-
-                            <div class="form-group-block">
-                                <label class="form-label-text">Response Time (Latency)</label>
-                                <span class="mono text-muted">~<?= $apiHealth['latency_ms'] ?> milidetik</span>
-                            </div>
-
-                            <div class="flex-row-center">
-                                <a href="<?= htmlspecialchars(API_ENDPOINT_URL) ?>" target="_blank" rel="noopener noreferrer" class="btn btn-outline">
-                                    Buka Endpoint Langsung ↗
-                                </a>
-                            </div>
-                        </div>
-
-                        <div class="config-card">
-                            <div class="config-card-header">
-                                <h2 class="config-card-title">Contoh Perintah cURL</h2>
-                            </div>
-                            <p class="text-muted">Gunakan perintah berikut di terminal untuk menguji endpoint secara manual:</p>
-                            <pre class="prose-dark"><code class="mono">curl -X GET "<?= htmlspecialchars(API_ENDPOINT_URL) ?>" \
-  -H "Accept: application/json"</code></pre>
-                        </div>
+                            </article>
+                        <?php endforeach; ?>
                     </div>
 
-                    <!-- Raw Response Inspector -->
-                    <div class="raw-json-inspector-box">
-                        <div class="json-inspector-header">
-                            <span class="json-inspector-title">
-                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                    <polyline points="16 18 22 12 16 6"></polyline>
-                                    <polyline points="8 6 2 12 8 18"></polyline>
-                                </svg>
-                                Respon JSON Mentah dari Endpoint (Sampel 1 Item Pertama)
-                            </span>
-                        </div>
-                        <pre class="json-code-display"><?= htmlspecialchars(json_encode(!empty($allArticles[0]) ? $allArticles[0] : ['status' => 'no_data'], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)) ?></pre>
-                    </div>
+                    <!-- Pagination -->
+                    <?php
+                    render_pagination(
+                        $currentPage,
+                        $totalPages,
+                        $totalItems,
+                        count($paginatedArticles),
+                        fn($p) => build_page_url($p, $selectedCatSlug, $searchQuery, $selectedTagId, $selectedAuthorId)
+                    );
+                    ?>
+                </section>
+            <?php else : ?>
+                <?php render_empty_state(
+                    'Tidak Ada Berita',
+                    'Tidak ada berita yang cocok dengan filter yang dipilih.',
+                    'Lihat Semua Berita',
+                    home_url()
+                ); ?>
+            <?php endif; ?>
 
-                <?php endif; ?>
+        <?php else : ?>
+            <?php render_empty_state(
+                'Tidak Ada Berita Ditemukan',
+                'Belum ada data berita yang dapat dimuat dari backend.',
+                'Coba Lagi',
+                home_url()
+            ); ?>
+        <?php endif; ?>
 
-            </main>
-        </div>
     </div>
+</main>
 
-    <!-- Scripts: Mobile Navigation & Keyboard Shortcuts -->
-    <script>
+<?php render_site_footer(); ?>
+
+<script>
     document.addEventListener('DOMContentLoaded', function() {
-        const mobileNavToggle = document.getElementById('mobileNavToggle');
-        const sidebarCloseBtn = document.getElementById('sidebarCloseBtn');
-        const appSidebar = document.getElementById('appSidebar');
-        const sidebarBackdrop = document.getElementById('sidebarBackdrop');
+        const slides = document.querySelectorAll('.slider-slide');
+        const dots = document.querySelectorAll('.slider-dot');
+        const prevBtn = document.getElementById('sliderPrevBtn');
+        const nextBtn = document.getElementById('sliderNextBtn');
+        const area = document.getElementById('headlineSliderArea');
+        if (!slides.length) return;
 
-        function openSidebar() {
-            if (appSidebar) appSidebar.classList.add('open');
-            if (sidebarBackdrop) sidebarBackdrop.classList.add('show');
-            document.body.classList.add('sidebar-locked');
+        let current = 0,
+            timer = null;
+
+        function goTo(i) {
+            slides.forEach((s, idx) => s.classList.toggle('active', idx === i));
+            dots.forEach((d, idx) => d.classList.toggle('active', idx === i));
+            current = i;
         }
 
-        function closeSidebar() {
-            if (appSidebar) appSidebar.classList.remove('open');
-            if (sidebarBackdrop) sidebarBackdrop.classList.remove('show');
-            document.body.classList.remove('sidebar-locked');
+        function next() {
+            goTo((current + 1) % slides.length);
         }
 
-        if (mobileNavToggle) mobileNavToggle.addEventListener('click', openSidebar);
-        if (sidebarCloseBtn) sidebarCloseBtn.addEventListener('click', closeSidebar);
-        if (sidebarBackdrop) sidebarBackdrop.addEventListener('click', closeSidebar);
+        function prev() {
+            goTo((current - 1 + slides.length) % slides.length);
+        }
 
-        document.addEventListener('keydown', function(e) {
-            // Close mobile menu on Escape
-            if (e.key === 'Escape') {
-                closeSidebar();
-            }
+        function startAuto() {
+            stopAuto();
+            timer = setInterval(next, 5000);
+        }
 
-            // Quick focus search on '/'
-            if (e.key === '/' && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA') {
-                e.preventDefault();
-                const searchInput = document.getElementById('searchInput');
-                if (searchInput) {
-                    searchInput.focus();
-                    searchInput.select();
-                }
+        function stopAuto() {
+            if (timer) {
+                clearInterval(timer);
+                timer = null;
             }
+        }
+
+        if (nextBtn) nextBtn.addEventListener('click', () => {
+            next();
+            startAuto();
         });
+        if (prevBtn) prevBtn.addEventListener('click', () => {
+            prev();
+            startAuto();
+        });
+        dots.forEach(d => d.addEventListener('click', function() {
+            goTo(parseInt(this.dataset.slide, 10));
+            startAuto();
+        }));
+        if (area) {
+            area.addEventListener('mouseenter', stopAuto);
+            area.addEventListener('mouseleave', startAuto);
+        }
+        if (slides.length > 1) startAuto();
     });
-    </script>
-</body>
-
-</html>
+</script>

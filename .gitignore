@@ -48,3 +48,7 @@ Desktop.ini
 .phpunit.cache/
 .php-cs-fixer.cache
 .phpunit.result.cache
+
+# Runtime cache
+cache/*.json
+cache/*.tmp
