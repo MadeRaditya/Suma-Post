@@ -149,7 +149,7 @@ render_site_header($postTitle, 'home', $postCatSlug);
                             <div class="post-tags-row">
                                 <span style="font-size:.8rem;font-weight:600;color:var(--ink-500);margin-right:.25rem;">Tag:</span>
                                 <?php foreach ($postTags as $tag) : ?>
-                                    <a href="<?= page_url('search.php', ['q' => $tag['name']]) ?>"
+                                    <a href="<?= home_url(['tag_id' => (int) $tag['id']]) ?>"
                                         class="post-tag-link">
                                         # <?= htmlspecialchars($tag['name']) ?>
                                     </a>
@@ -242,9 +242,10 @@ render_site_header($postTitle, 'home', $postCatSlug);
                                 <span style="color:var(--ink-400);font-weight:600;font-size:.7rem;text-transform:uppercase;letter-spacing:.05em;">Tag</span>
                                 <div style="display:flex;flex-wrap:wrap;gap:.375rem;">
                                     <?php foreach (array_slice($postTags, 0, 5) as $tag) : ?>
-                                        <span class="post-tag-link" style="pointer-events:none;">
+                                        <a href="<?= home_url(['tag_id' => (int) $tag['id']]) ?>"
+                                            class="post-tag-link">
                                             # <?= htmlspecialchars($tag['name']) ?>
-                                        </span>
+                                        </a>
                                     <?php endforeach; ?>
                                 </div>
                             </div>
